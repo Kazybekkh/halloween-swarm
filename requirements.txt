@@ -1,0 +1,8 @@
+# Exact versions this swarm was built and run with on 2026-10-28 (Python 3.12).
+# crewai and crewai-tools move in lockstep; mcp 2.x breaks crewai 1.15.2's MCP client.
+crewai==1.15.2
+crewai-tools==1.15.2
+mcp==1.26.0
+openai==2.54.0
+httpx==0.28.1
+python-dotenv==1.2.4

@@ -1,0 +1,8 @@
+.env
+.onerc
+.venv/
+__pycache__/
+*.pyc
+logs/
+.gstack/
+.memory/

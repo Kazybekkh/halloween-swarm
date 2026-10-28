@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Exorcism Swarm Replay</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Silkscreen&display=swap">
+<style>
+  /* Layout: one pixel-art canvas (the Loft floor plan) above a row of arcade controls. Single dark look. */
+  :root {
+    --bg: #0b0a10; --panel: #15121d; --line: #2d2740; --text: #efe9ff; --muted: #9b92b4; --accent: #b48cff;
+    --pixel: "Silkscreen", ui-monospace, "SFMono-Regular", Menlo, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 var(--pixel); }
+  .wrap { max-width: 1240px; margin: 0 auto; padding-block: 12px;
+          padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  .top { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+  h1 { margin: 0; font-size: 16px; letter-spacing: 1px; text-wrap: balance; }
+  .note { color: var(--muted); font-size: 11px; }
+  canvas { display: block; width: 100%; height: auto; image-rendering: pixelated; image-rendering: crisp-edges;
+           border: 2px solid var(--line); border-radius: 4px; background: var(--bg); }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+  button, select { font: 12px var(--pixel); color: var(--text); background: var(--panel); border: 2px solid var(--line);
+                   border-radius: 3px; padding: 7px 10px; cursor: pointer; }
+  button:hover, select:hover { border-color: var(--accent); }
+  button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .grow { flex: 1; min-width: 140px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .caption { margin-top: 10px; padding: 10px 12px; border: 2px solid var(--line); border-radius: 3px; background: var(--panel);
+             font-size: 12px; overflow-wrap: anywhere; }
+  .caption b { color: var(--accent); }
+  @media (min-width: 760px) { .caption { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <h1>EXORCISM PROTOCOL · SWARM REPLAY</h1>
+    <div class="note" id="note"></div>
+  </div>
+  <canvas id="game" width="480" height="300" aria-label="Pixel-art replay of the swarm run"></canvas>
+  <div class="controls">
+    <button id="prev" title="Previous phase (←)">◀◀</button>
+    <button id="play" title="Play or pause (space)">▶ PLAY</button>
+    <button id="next" title="Next phase (→)">▶▶</button>
+    <select id="tick" aria-label="Jump to tick"></select>
+    <select id="speed" aria-label="Speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
+    <div class="grow"><input id="scrub" type="range" min="0" max="1000" value="0" aria-label="Timeline"></div>
+  </div>
+  <div class="caption" id="caption" aria-live="polite"></div>
+</div>
+<script>
+const RUN = /*__RUN_DATA__*/null;
+const W = 480, H = 300;
+const cv = document.getElementById("game"), g = cv.getContext("2d");
+g.imageSmoothingEnabled = false;
+const $ = id => document.getElementById(id);
+const C = {
+  floorA: "#1b1826", floorB: "#201c2d", wall: "#4a4166", wallHi: "#6a5d92", hall: "#14121c", hallB: "#181522",
+  text: "#efe9ff", muted: "#9b92b4", accent: "#b48cff", gold: "#f2c94c", blue: "#62b0ff", cold: "#8fd3ff",
+  observe: "#55d68f", contain: "#f2a541", evacuate: "#ff5d5d", ghost: "#e8f0ff", eye: "#f2e36b", radio: "#7d8cff",
+  skin: "#f1c6a0", dark: "#0b0a10", box: "#120f19",
+};
+const ACT = { observe: C.observe, contain: C.contain, evacuate: C.evacuate };
+const BENIGN = /human|crowd|staff|visitor|animal|maintenance|none/i;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const ease = p => p < 0 ? 0 : p > 1 ? 1 : p * p * (3 - 2 * p);
+const lerp = (a, b, p) => a + (b - a) * p;
+const human = s => String(s).replace(/_/g, " ");
+const fmt = (n, d = 2) => n == null ? "n/a" : Number(n).toFixed(d);
+
+// ---------- timeline: each tick plays seven phases ----------
+const PHASES = ["INGEST", "TRIAGE", "SWARM", "COMMAND", "GATE", "SUBMIT", "ESCALATE"];
+const segs = []; let T = 0;
+RUN.ticks.forEach((t, ti) => {
+  const crew = t.sectors.some(s => !s.triaged);
+  const durs = [2.6, 3.4, crew ? 5.0 : 1.8, crew ? 3.6 : 1.4, 2.8, 3.0, t.escalations.length ? 4.2 : 2.0];
+  durs.forEach((d, pi) => { segs.push({ ti, pi, start: T, dur: d }); T += d; });
+});
+let now = 0, playing = false, speed = 1, last = 0;
+const segAt = t => segs.find(s => t >= s.start && t < s.start + s.dur) || segs[segs.length - 1];
+
+// ---------- deterministic randomness for room props ----------
+function rng(seed) { let h = 2166136261; for (const c of String(seed)) h = Math.imul(h ^ c.charCodeAt(0), 16777619);
+  return () => { h = Math.imul(h ^ (h >>> 15), 2246822507); h = Math.imul(h ^ (h >>> 13), 3266489909); return ((h ^= h >>> 16) >>> 0) / 4294967296; }; }
+
+// ---------- floor plan per tick ----------
+const LEFT = { hq: [8, 34, 112, 48], lab: [8, 86, 112, 48], oracle: [8, 138, 112, 36], radio: [8, 178, 112, 36] };
+const HALL_X = [122, 134];
+function layout(t) {
+  const n = t.sectors.length, cols = Math.min(n, 3), rows = Math.ceil(n / cols);
+  const x0 = 140, x1 = 472, gap = 8, rw = Math.floor((x1 - x0 - (cols - 1) * gap) / cols);
+  const rh = rows === 1 ? 146 : 78, ys = rows === 1 ? [34] : [34, 138];
+  const corridor = rows === 1 ? [180, 206] : [112, 138];
+  const rooms = {};
+  t.sectors.forEach((s, i) => {
+    const r = Math.floor(i / cols), c = i % cols, x = x0 + c * (rw + gap), y = ys[r];
+    const doorY = r === 0 ? y + rh : y;  // top-row doors face down onto the corridor, bottom-row doors face up
+    rooms[s.name] = { x, y, w: rw, h: rh, door: [x + rw / 2, doorY], cy: (corridor[0] + corridor[1]) / 2, s };
+  });
+  return { rooms, corridor, exit: [x1, (corridor[0] + corridor[1]) / 2] };
+}
+
+// ---------- pixel primitives ----------
+function rect(x, y, w, h, c) { g.fillStyle = c; g.fillRect(Math.round(x), Math.round(y), Math.round(w), Math.round(h)); }
+function text(s, x, y, c = C.text, size = 8, align = "left") { g.font = `${size}px Silkscreen, monospace`; g.fillStyle = c; g.textAlign = align; g.textBaseline = "top"; g.fillText(s, Math.round(x), Math.round(y)); }
+function tiles(x, y, w, h, a, b) { for (let i = 0; i < w; i += 8) for (let j = 0; j < h; j += 8) rect(x + i, y + j, Math.min(8, w - i), Math.min(8, h - j), ((i + j) / 8) % 2 ? a : b); }
+function walls(x, y, w, h, c = C.wall, door = null) {
+  rect(x, y, w, 2, c); rect(x, y + h - 2, w, 2, c); rect(x, y, 2, h, c); rect(x + w - 2, y, 2, h, c);
+  if (door) rect(door[0] - 7, door[1] - (door[1] > y + 2 ? 2 : 0), 14, 2, C.hall);
+}
+function person(x, y, body, opts = {}) {
+  const t = performance.now() / 1000, step = opts.walking ? Math.floor(t * 8) % 2 : 0, sh = opts.shake ? Math.round(Math.sin(t * 40)) : 0;
+  x = Math.round(x) + sh; y = Math.round(y);
+  rect(x - 2, y - 10, 4, 4, C.skin);            // head
+  if (opts.hat) rect(x - 3, y - 11, 6, 2, opts.hat);
+  rect(x - 3, y - 6, 6, 5, body);               // torso
+  rect(x - 3, y - 1, 2, 3 - step, C.dark); rect(x + 1, y - 1, 2, 2 + step, C.dark);  // legs
+  if (opts.tool) rect(x + 3, y - 6, 2, 4, opts.tool);
+  if (opts.antenna) { rect(x, y - 14, 1, 3, C.muted); rect(x - 1, y - 15, 3, 1, opts.antenna); }
+}
+function ghost(x, y, scale, color, alpha) {
+  const t = performance.now() / 1000; y += Math.sin(t * 2.2) * 2;
+  g.globalAlpha = alpha * (0.75 + 0.25 * Math.sin(t * 7));
+  const s = scale;
+  rect(x - 6 * s, y - 12 * s, 12 * s, 10 * s, color); rect(x - 4 * s, y - 14 * s, 8 * s, 2 * s, color);
+  for (let i = 0; i < 4; i++) rect(x - 6 * s + i * 3 * s, y - 2 * s, 2 * s, (2 + ((i + Math.floor(t * 6)) % 2)) * s, color);  // wavy hem
+  rect(x - 3 * s, y - 9 * s, 2 * s, 2 * s, C.dark); rect(x + 1 * s, y - 9 * s, 2 * s, 2 * s, C.dark);
+  g.globalAlpha = 1;
+}
+function bubble(x, y, s, c = C.text, border = C.accent) {
+  g.font = "8px Silkscreen, monospace"; const w = Math.ceil(g.measureText(s).width) + 8;
+  x = clamp(x - w / 2, 2, W - w - 2);
+  rect(x, y, w, 13, C.box); rect(x, y, w, 1, border); rect(x, y + 12, w, 1, border); rect(x, y, 1, 13, border); rect(x + w - 1, y, 1, 13, border);
+  text(s, x + 4, y + 3, c);
+}
+function stamp(x, y, s, c, p) {
+  if (p <= 0) return; const sc = 1 + (1 - ease(p * 3)) * 1.5;
+  g.save(); g.translate(x, y); g.scale(sc, sc); g.rotate(-0.12);
+  g.font = "8px Silkscreen, monospace"; const w = g.measureText(s).width + 8;
+  g.globalAlpha = clamp(p * 3, 0, 1); g.strokeStyle = c; g.lineWidth = 2; g.strokeRect(-w / 2, -7, w, 14);
+  g.fillStyle = c; g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(s, 0, 0); g.restore(); g.globalAlpha = 1;
+}
+function walk(path, p) {  // position along a polyline at progress p
+  const lens = []; let tot = 0;
+  for (let i = 1; i < path.length; i++) { const d = Math.hypot(path[i][0] - path[i - 1][0], path[i][1] - path[i - 1][1]); lens.push(d); tot += d; }
+  let d = ease(p) * tot;
+  for (let i = 0; i < lens.length; i++) { if (d <= lens[i]) { const q = lens[i] ? d / lens[i] : 0; return [lerp(path[i][0], path[i + 1][0], q), lerp(path[i][1], path[i + 1][1], q)]; } d -= lens[i]; }
+  return path[path.length - 1];
+}
+function wrap(s, maxW) {
+  g.font = "8px Silkscreen, monospace"; const out = []; let line = "";
+  for (const w of String(s).split(/\s+/)) { const tryL = line ? line + " " + w : w; if (g.measureText(tryL).width > maxW && line) { out.push(line); line = w; } else line = tryL; }
+  if (line) out.push(line); return out;
+}
+
+// ---------- the scene ----------
+function finalAction(s) { return s.final || (s.gate && s.gate.final) || (s.triaged ? "observe" : null); }
+function scoreBefore(ti, includeCurrent) {
+  let sc = 0, n = 0, fa = 0;
+  RUN.ticks.forEach((t, i) => { if (i < ti || (includeCurrent && i === ti)) { const j = t.submission && t.submission.judgment; if (j) { sc += j.score; n++; if (j.false_alarm) fa++; } } });
+  return { sc, n, fa };
+}
+
+function draw() {
+  const seg = segAt(now), t = RUN.ticks[seg.ti], pi = seg.pi, p = clamp((now - seg.start) / seg.dur, 0, 1);
+  const L = layout(t), crew = t.sectors.filter(s => !s.triaged), anim = performance.now() / 1000;
+  rect(0, 0, W, H, C.dark);
+
+  // HUD
+  const sb = scoreBefore(seg.ti, pi >= 5);
+  rect(0, 0, W, 26, C.box); rect(0, 25, W, 1, C.line || C.wall);
+  text("EXORCISM PROTOCOL", 8, 4, C.accent); text(RUN.mode === "live" ? "LIVE FEED" : "FIXTURE DRY RUN", 8, 14, C.muted);
+  text(`TICK ${t.tick_id}`, 160, 4, C.text); text(PHASES[pi], 160, 14, C.gold);
+  text(`SCORE ${sb.n ? `${sb.sc}/${sb.n}` : "--"}`, 250, 4, C.observe); text(`FALSE ALARMS ${sb.fa}`, 250, 14, sb.fa ? C.evacuate : C.muted);
+  const agents = pi >= 2 && crew.length ? (t.agents_per_chunk[0] || crew.length + 2) : 0;
+  text(`AGENTS ${agents}/${t.max_agents ?? "?"}`, 380, 4, C.blue); text(`${t.elapsed_s ?? "?"}S TICK`, 380, 14, C.muted);
+
+  // hallways
+  tiles(HALL_X[0], 34, HALL_X[1] - HALL_X[0], 180, C.hall, C.hallB);
+  tiles(HALL_X[0], L.corridor[0], 472 - HALL_X[0], L.corridor[1] - L.corridor[0], C.hall, C.hallB);
+  rect(470, L.corridor[0], 4, L.corridor[1] - L.corridor[0], C.observe); text("EXIT", 466, L.corridor[0] + 9, C.observe, 8, "right");
+
+  // left column: HQ, lab, oracle, radio
+  for (const [k, [x, y, w, h]] of Object.entries(LEFT)) { tiles(x, y, w, h, C.floorA, C.floorB); walls(x, y, w, h); rect(x + w - 2, y + h / 2 - 6, 2, 12, C.hall); }
+  text("HQ · COMMANDER", 12, 37, C.gold); text("LAB · YOU.COM", 12, 89, C.blue); text("ORACLE · DECISIONS", 12, 141, C.eye); text("RADIO · ONE", 12, 181, C.radio);
+  // commander at the war table
+  rect(40, 62, 40, 12, "#3a2f55"); rect(42, 64, 36, 8, "#2a2340");
+  person(60, 60, C.gold, { hat: "#8a6d1f" });
+  // researcher at a laptop
+  rect(46, 116, 26, 8, "#2a2340"); rect(52, 110, 14, 7, pi === 2 && crew.length ? (Math.floor(anim * 6) % 2 ? C.blue : "#3d6fa8") : "#2c4466");
+  person(60, 128, C.blue, { tool: "#2c4466" });
+  // oracle eye
+  const eyeOpen = pi === 1 || pi === 4 ? 1 : 0.25, ex = 64, ey = 160;
+  rect(ex - 16, ey - 4 * eyeOpen, 32, 8 * eyeOpen, C.eye); rect(ex - 3, ey - 3 * eyeOpen, 6, 6 * eyeOpen, C.dark);
+  if (t.triage_ms != null) text(`${t.triage_ms} MS`, 92, 165, C.muted);
+  // radio tower
+  rect(62, 186, 3, 24, C.radio); rect(56, 208, 15, 2, C.radio); rect(58, 196, 11, 1, C.radio);
+  if (pi === 6 && t.escalations.length) for (let k = 0; k < 3; k++) { const r = ((anim * 30 + k * 10) % 30); g.globalAlpha = 1 - r / 30; g.strokeStyle = C.radio; g.lineWidth = 1; g.beginPath(); g.arc(63.5, 187, r, Math.PI * 1.1, Math.PI * 1.9); g.stroke(); }
+  g.globalAlpha = 1;
+
+  // sector rooms
+  t.sectors.forEach(s => {
+    const R = L.rooms[s.name], rd = s.reading || {}, sen = rd.sensors || {}, sg = rd.sighting, act = finalAction(s);
+    const shown = pi >= 4 ? act : pi >= 3 && s.decision ? s.decision.action : (pi >= 1 && s.triaged && p > 0.7) || (pi > 1 && s.triaged) ? "observe" : null;
+    tiles(R.x, R.y, R.w, R.h, C.floorA, C.floorB);
+    if (shown) { g.globalAlpha = 0.18; rect(R.x, R.y, R.w, R.h, ACT[shown]); g.globalAlpha = 1; }
+    const breached = (rd.containment_state || "") === "breached";
+    walls(R.x, R.y, R.w, R.h, breached && Math.floor(anim * 3) % 2 ? C.evacuate : shown ? ACT[shown] : C.wall, R.door);
+    text(human(s.name).toUpperCase(), R.x + 5, R.y + 5, C.text);
+    // EMF gauge and temperature
+    const emf = sen.emf_milligauss ?? 0, bar = clamp(Math.log10(1 + emf) / Math.log10(200), 0, 1);
+    rect(R.x + 5, R.y + 16, 40, 4, C.dark); rect(R.x + 5, R.y + 16, 40 * bar, 4, emf >= 30 ? C.evacuate : C.observe);
+    text(`EMF ${emf}`, R.x + 48, R.y + 14, C.muted);
+    text(`${sen.temp_c ?? "?"}°C`, R.x + 5, R.y + 23, (sen.temp_c ?? 20) <= 5 ? C.cold : C.muted);
+    if (rd.containment_state) text(rd.containment_state.toUpperCase(), R.x + R.w - 5, R.y + 5, breached ? C.evacuate : C.muted, 8, "right");
+    // frost when cold
+    if ((sen.temp_c ?? 20) <= 5) { g.globalAlpha = 0.12; rect(R.x + 2, R.y + 2, R.w - 4, R.h - 4, C.cold); g.globalAlpha = 1; }
+    // occupants
+    const rand = rng(s.name), midY = R.y + R.h * 0.62;
+    const pinned = /(\d+)\s*pinned/i.exec(rd.civilian_status || ""), nPinned = pinned ? +pinned[1] : 0;
+    const evacuating = act === "evacuate" && pi >= 5, ep = pi === 5 ? p * 0.5 : pi === 6 ? 0.5 + p * 0.5 : 0;
+    for (let k = 0; k < nPinned; k++) {
+      const home = [R.x + 12 + (k % 2) * 8, midY - 6 + Math.floor(k / 2) * 12];
+      if (evacuating) { const pos = walk([home, [R.door[0], R.door[1] + (R.door[1] > R.y + 2 ? 4 : -4)], [R.door[0], R.cy + 4], [L.exit[0] - 4, R.cy + 4]], clamp(ep * 1.3 - k * 0.08, 0, 1));
+        if (pos[0] < L.exit[0] - 6) person(pos[0], pos[1], "#c9c3d9", { walking: true }); }
+      else person(home[0], home[1], "#c9c3d9", { shake: true });
+    }
+    if (sg && BENIGN.test(sg.entity_class)) for (let k = 0; k < 6; k++) {
+      const bx = R.x + 20 + rand() * (R.w - 40), by = R.y + 36 + rand() * (R.h - 48), wob = Math.sin(anim * 1.5 + k) * 3;
+      person(bx + wob, by, ["#7fa4c9", "#c98fa0", "#9fc98f", "#c9b88f"][k % 4], { walking: true });
+    }
+    if (sg && !BENIGN.test(sg.entity_class)) {
+      const gx = R.x + R.w * 0.68, gy = midY + 4, contained = act === "contain" && pi >= 5;
+      ghost(gx, gy, sg.confidence > 0.6 ? 2 : 1, sg.confidence > 0.6 ? C.ghost : "#9fb3d9", clamp(sg.confidence + 0.2, 0.3, 1));
+      text(`${sg.entity_class} ${sg.confidence}`.toUpperCase(), R.x + R.w - 5, R.y + R.h - 12, C.muted, 8, "right");
+      if (contained) { g.strokeStyle = C.contain; g.lineWidth = 2; g.globalAlpha = 0.7 + 0.3 * Math.sin(anim * 5); g.beginPath(); g.arc(gx, gy - 12, 22, 0, Math.PI * 2); g.stroke(); g.globalAlpha = 1; }
+    }
+    // triage readout
+    if (pi >= 1 && s.p != null && (pi > 1 || p > 0.25)) bubble(R.x + R.w / 2, R.y + R.h - 28, `P=${fmt(s.p)} · ${s.rule ? s.rule.signals.length : "?"} SIGNALS`, s.p >= 0.5 ? C.evacuate : C.observe, C.eye);
+    if (pi === 1 && p > 0.25) { g.strokeStyle = C.eye; g.globalAlpha = 0.35; g.lineWidth = 1; g.beginPath(); g.moveTo(ex + 16, ey); g.lineTo(R.x + R.w / 2, R.y + R.h / 2); g.stroke(); g.globalAlpha = 1; }
+    if (s.triaged && (pi > 1 || (pi === 1 && p > 0.7))) stamp(R.x + R.w / 2, R.y + R.h / 2 - 6, "CLEAR", C.observe, pi === 1 ? (p - 0.7) / 0.3 : 1);
+    // gate verdict
+    if (s.gate && pi >= 4) { const ok = s.gate.final === s.gate.proposed; stamp(R.x + R.w / 2, R.y + R.h / 2 - 6, ok ? s.gate.final.toUpperCase() : "VETO", ok ? ACT[s.gate.final] : C.gold, pi === 4 ? p : 1); }
+  });
+
+  // scouts walk from HQ to their rooms and report
+  crew.forEach((s, k) => {
+    const R = L.rooms[s.name]; if (!R || pi < 2) return;
+    const into = R.door[1] > R.y + 2 ? -14 : 14;
+    const path = [[118, 60 + k * 4], [128, 60 + k * 4], [128, R.cy], [R.door[0], R.cy], [R.door[0], R.door[1] + into], [R.x + R.w * 0.42, R.y + R.h * 0.62]];
+    const wp = pi === 2 ? clamp(p / 0.6, 0, 1) : 1, pos = walk(path, wp);
+    person(pos[0], pos[1], C.accent, { walking: wp < 1, antenna: C.observe });
+    if (s.scout && pi <= 3 && (pi > 2 || p > 0.62)) bubble(pos[0], pos[1] - 30, `THREAT ${s.scout.threat_level}/10 → ${s.scout.recommended_action.toUpperCase()}`, ACT[s.scout.recommended_action]);
+  });
+  if (pi === 2 && crew.length) bubble(60, 98, t.grounding_reused ? "FACTS REUSED" : `${t.searches} SEARCHES`, C.blue, C.blue);
+  if (pi === 3 && crew.length) { const d = crew.map(s => s.decision).filter(Boolean)[0]; if (d) bubble(60, 44, `${d.action.toUpperCase()} · CONF ${fmt(d.confidence)}`, ACT[d.action], C.gold); }
+  if (pi === 5) { const j = t.submission && t.submission.judgment, a = p < 0.15 ? p / 0.15 : p > 0.85 ? (1 - p) / 0.15 : 1;
+    const msg = j ? (j.verdict === "correct" ? `+${j.score} CORRECT · EXPECTED ${j.expected.toUpperCase()}` : `${j.verdict.toUpperCase()} · SCORE ${j.score}`) : `DRY RUN · ${String(t.tick_action).toUpperCase()} NOT SUBMITTED`;
+    g.globalAlpha = a; rect(140, 92, 332, 26, C.box); rect(140, 92, 332, 1, j && j.verdict === "correct" ? C.observe : C.muted);
+    text(msg, 306, 101, j ? (j.verdict === "correct" ? C.observe : C.evacuate) : C.muted, 8, "center"); g.globalAlpha = 1; }
+  if (pi === 0) { const a = p < 0.15 ? p / 0.15 : p > 0.85 ? (1 - p) / 0.15 : 1; g.globalAlpha = a; rect(140, 92, 332, 26, C.box); text(`TICK ${t.tick_id} INCOMING`, 306, 101, C.gold, 8, "center"); g.globalAlpha = 1; }
+
+  dialog(t, pi, p, crew);
+}
+
+function lineFor(t, pi, crew) {
+  const first = crew.find(s => s.scout) || {}, d = (crew.find(s => s.decision) || {}).decision;
+  switch (pi) {
+    case 0: return ["FEED", `Tick ${t.tick_id}: ${t.sectors.length} sector${t.sectors.length > 1 ? "s" : ""} report in. Agent budget ${t.max_agents ?? "?"}. Each reading goes into its own scout's memory.`];
+    case 1: return ["ORACLE · OPENAI DECISIONS", `Scored every sector in ${t.triage_ms ?? "?"} ms. ` + t.sectors.map(s => `${human(s.name)} p=${fmt(s.p)}${s.triaged ? " clear" : " → crew"}`).join(", ") + "."];
+    case 2: return crew.length ? [`SCOUT · ${human(first.name || "").toUpperCase()}`, first.scout ? `Threat ${first.scout.threat_level}/10, ${first.scout.civilians_at_risk} at risk. ${first.scout.reasoning}` : "No scout report."]
+                               : ["SWARM", "Every sector cleared by triage. No Parasail call needed."];
+    case 3: return crew.length && d ? ["COMMANDER · PARASAIL", `${d.action.toUpperCase()} at confidence ${fmt(d.confidence)}. ${d.rationale}`] : ["COMMANDER", "Nothing to command this tick."];
+    case 4: { const gs = t.sectors.filter(s => s.gate); return ["GATE · RULE + DECISIONS", gs.length ? gs.map(s => `${human(s.name)}: ${s.gate.proposed} → ${s.gate.final} (${s.gate.why})`).join(" ") : "Nothing proposed beyond observe. Nothing to veto."]; }
+    case 5: { const j = t.submission && t.submission.judgment; return ["SCENARIO FEED", j ? `Submitted ${t.tick_action}. Expected ${j.expected}: ${j.verdict}, score ${j.score}, false alarm ${j.false_alarm}. ${j.rationale}` : `Dry run: ${t.tick_action} not submitted.`]; }
+    case 6: return t.escalations.length ? ["RADIO · ONE → #LOFT-INCIDENT", `${t.escalations[0].status.toUpperCase()}: ${t.escalations[0].message}`] : ["RADIO", "No contain or evacuate. Nothing posted."];
+  }
+}
+function dialog(t, pi, p, crew) {
+  const [who, msg] = lineFor(t, pi, crew), x = 8, y = 220, w = W - 16, h = 74;
+  rect(x, y, w, h, C.box); rect(x, y, w, 2, C.accent); rect(x, y + h - 2, w, 2, C.accent); rect(x, y, 2, h, C.accent); rect(x + w - 2, y, 2, h, C.accent);
+  g.font = "8px Silkscreen, monospace"; const tw = g.measureText(who).width + 10;
+  rect(x + 8, y - 6, tw, 12, C.accent); text(who, x + 13, y - 4, C.dark);
+  const shown = msg.slice(0, Math.ceil(msg.length * clamp(p / 0.55, 0, 1)));
+  wrap(shown, w - 20).slice(0, 5).forEach((ln, i) => text(ln, x + 10, y + 12 + i * 11, C.text));
+  if (p >= 0.55 && Math.floor(performance.now() / 400) % 2) text("▼", x + w - 14, y + h - 12, C.accent);
+  const cap = $("caption"), html = `<b>${who}</b><br>${msg.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]))}`;
+  if (cap.dataset.k !== who + msg) { cap.innerHTML = html; cap.dataset.k = who + msg; }
+}
+
+// ---------- controls ----------
+$("note").textContent = `${RUN.mode === "live" ? "Live run" : "Fixture dry run"} of ${RUN.team || "the swarm"} · ${RUN.ticks.length} ticks · every number comes from ${RUN.log}`;
+RUN.ticks.forEach((t, i) => { const o = document.createElement("option"); o.value = i; o.textContent = `TICK ${t.tick_id}`; $("tick").appendChild(o); });
+function setPlay(on) { playing = on; $("play").textContent = on ? "❚❚ PAUSE" : "▶ PLAY"; }
+function jumpPhase(dir) { const i = segs.indexOf(segAt(now)); const s = segs[clamp(i + dir, 0, segs.length - 1)]; now = s.start + (dir === 0 ? 0 : 0.001); }
+$("play").onclick = () => { if (now >= T - 0.05) now = 0; setPlay(!playing); };
+$("prev").onclick = () => { const s = segAt(now); now = now - s.start > 0.6 ? s.start : (segs[segs.indexOf(s) - 1] || s).start; };
+$("next").onclick = () => jumpPhase(1);
+$("tick").onchange = e => { now = segs.find(s => s.ti === +e.target.value).start; };
+$("speed").onchange = e => { speed = +e.target.value; };
+$("scrub").oninput = e => { now = (+e.target.value / 1000) * T; setPlay(false); };
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "SELECT") return;
+  if (e.key === " ") { e.preventDefault(); $("play").click(); }
+  if (e.key === "ArrowRight") $("next").click();
+  if (e.key === "ArrowLeft") $("prev").click();
+});
+const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+function frame(ts) {
+  const dt = last ? Math.min(0.1, (ts - last) / 1000) : 0; last = ts;
+  if (playing) { now += dt * speed; if (now >= T) { now = T - 0.001; setPlay(false); } }
+  $("scrub").value = Math.round((now / T) * 1000); $("tick").value = segAt(now).ti;
+  draw(); requestAnimationFrame(frame);
+}
+// open on the first breach tick's swarm phase so the still frame already shows the game
+const firstBreach = segs.find(s => s.pi === 2 && RUN.ticks[s.ti].sectors.some(x => !x.triaged));
+now = firstBreach ? firstBreach.start + firstBreach.dur * 0.8 : 0;
+(document.fonts && document.fonts.load ? document.fonts.load("8px Silkscreen").catch(() => {}) : Promise.resolve()).finally(() => { if (!still) setPlay(false); requestAnimationFrame(frame); });
+</script>
+</body>
+</html>
