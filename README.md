@@ -15,6 +15,7 @@ Team `team-hollow-lantern-08`, scored by the scenario feed on 2026-10-28:
 
 Scoreboard after the run: 3 / 3, 0 false alarms. Watch it: open [docs/replay-live.html](docs/replay-live.html)
 in a browser (a pixel-art replay of that live run; space plays, arrow keys step).
+It runs with one command. CrewAI runs the swarm, Parasail makes every decision, You.com grounds it, and One takes the action. Three for three, zero false alarms. Thanks.
 
 ## Run
 
