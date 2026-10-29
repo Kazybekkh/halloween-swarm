@@ -49,7 +49,7 @@
     <button id="play" title="Play or pause (space)">▶ PLAY</button>
     <button id="next" title="Next phase (→)">▶▶</button>
     <select id="tick" aria-label="Jump to tick"></select>
-    <select id="speed" aria-label="Speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
+    <select id="speed" aria-label="Speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2">2×</option></select>
     <div class="grow"><input id="scrub" type="range" min="0" max="1000" value="0" aria-label="Timeline"></div>
   </div>
   <div class="caption" id="caption" aria-live="polite"></div>
@@ -76,11 +76,15 @@ const fmt = (n, d = 2) => n == null ? "n/a" : Number(n).toFixed(d);
 
 // ---------- timeline: each tick plays seven phases ----------
 const PHASES = ["INGEST", "TRIAGE", "SWARM", "COMMAND", "GATE", "SUBMIT", "ESCALATE"];
+const STEP_NAMES = ["STEP 1 · NEW TICK", "STEP 2 · QUICK FILTER", "STEP 3 · AGENTS INVESTIGATE", "STEP 4 · COMMANDER DECIDES",
+                    "STEP 5 · FALSE-ALARM CHECK", "STEP 6 · SCORED", "STEP 7 · DISCORD ALERT"];
+const TYPE_CPS = 60;                          // narration types at 60 characters a second
+const readTime = msg => 1.5 + msg.split(/\s+/).length / 3.5;  // then stays up long enough to read at a normal pace
 const segs = []; let T = 0;
 RUN.ticks.forEach((t, ti) => {
-  const crew = t.sectors.some(s => !s.triaged);
-  const durs = [2.6, 3.4, crew ? 5.0 : 1.8, crew ? 3.6 : 1.4, 2.8, 3.0, t.escalations.length ? 4.2 : 2.0];
-  durs.forEach((d, pi) => { segs.push({ ti, pi, start: T, dur: d }); T += d; });
+  const crew = t.sectors.filter(s => !s.triaged), has = crew.length > 0;
+  const base = [2.6, 3.4, has ? 5.0 : 1.8, has ? 3.6 : 1.4, 2.8, 3.0, t.escalations.length ? 4.2 : 2.0];  // animation minimums
+  base.forEach((d, pi) => { const dur = Math.max(d, readTime(narrate(t, ti, pi, crew)[1])); segs.push({ ti, pi, start: T, dur }); T += dur; });
 });
 let now = 0, playing = false, speed = 1, last = 0;
 const segAt = t => segs.find(s => t >= s.start && t < s.start + s.dur) || segs[segs.length - 1];
@@ -268,32 +272,55 @@ function draw() {
     text(msg, 306, 101, j ? (j.verdict === "correct" ? C.observe : C.evacuate) : C.muted, 8, "center"); g.globalAlpha = 1; }
   if (pi === 0) { const a = p < 0.15 ? p / 0.15 : p > 0.85 ? (1 - p) / 0.15 : 1; g.globalAlpha = a; rect(140, 92, 332, 26, C.box); text(`TICK ${t.tick_id} INCOMING`, 306, 101, C.gold, 8, "center"); g.globalAlpha = 1; }
 
-  dialog(t, pi, p, crew);
+  dialog(t, seg.ti, pi, seg, crew);
 }
 
-function lineFor(t, pi, crew) {
-  const first = crew.find(s => s.scout) || {}, d = (crew.find(s => s.decision) || {}).decision;
+function pct(v) { return v == null ? "?" : `${Math.round(v * 100)}%`; }
+function cap1(str) { return str.charAt(0).toUpperCase() + str.slice(1); }
+function cut(str, n) { str = String(str || "").trim(); return str.length > n ? str.slice(0, n - 1).replace(/\s+\S*$/, "") + "…" : str; }
+function signs(k) { return `${k} warning sign${k === 1 ? "" : "s"}`; }
+function narrate(t, ti, pi, crew) {
+  const first = crew.find(s => s.scout), d = (crew.find(s => s.decision) || {}).decision, name = s => cap1(human(s.name));
   switch (pi) {
-    case 0: return ["FEED", `Tick ${t.tick_id}: ${t.sectors.length} sector${t.sectors.length > 1 ? "s" : ""} report in. Agent budget ${t.max_agents ?? "?"}. Each reading goes into its own scout's memory.`];
-    case 1: return ["ORACLE · OPENAI DECISIONS", `Scored every sector in ${t.triage_ms ?? "?"} ms. ` + t.sectors.map(s => `${human(s.name)} p=${fmt(s.p)}${s.triaged ? " clear" : " → crew"}`).join(", ") + "."];
-    case 2: return crew.length ? [`SCOUT · ${human(first.name || "").toUpperCase()}`, first.scout ? `Threat ${first.scout.threat_level}/10, ${first.scout.civilians_at_risk} at risk. ${first.scout.reasoning}` : "No scout report."]
-                               : ["SWARM", "Every sector cleared by triage. No Parasail call needed."];
-    case 3: return crew.length && d ? ["COMMANDER · PARASAIL", `${d.action.toUpperCase()} at confidence ${fmt(d.confidence)}. ${d.rationale}`] : ["COMMANDER", "Nothing to command this tick."];
-    case 4: { const gs = t.sectors.filter(s => s.gate); return ["GATE · RULE + DECISIONS", gs.length ? gs.map(s => `${human(s.name)}: ${s.gate.proposed} → ${s.gate.final} (${s.gate.why})`).join(" ") : "Nothing proposed beyond observe. Nothing to veto."]; }
-    case 5: { const j = t.submission && t.submission.judgment; return ["SCENARIO FEED", j ? `Submitted ${t.tick_action}. Expected ${j.expected}: ${j.verdict}, score ${j.score}, false alarm ${j.false_alarm}. ${j.rationale}` : `Dry run: ${t.tick_action} not submitted.`]; }
-    case 6: { if (!t.escalations.length) return ["RADIO", "No contain or evacuate. Nothing posted."];
-      const e = t.escalations[0];
-      return ["RADIO · ONE → #LOFT-INCIDENT", `${e.label || String(e.status).toUpperCase()} Message: ${e.message}`]; }
+    case 0: return [STEP_NAMES[0], (ti === 0 ? "This replays our live run; every number comes from its log. " : "") +
+      `Tick ${t.tick_id} arrives with ${t.sectors.length} area${t.sectors.length > 1 ? "s" : ""}: ${t.sectors.map(s => human(s.name)).join(" and ")}. Each reading is saved to that area's own scout memory.`];
+    case 1: return [STEP_NAMES[1], `A sensor rule plus OpenAI Decisions, in ${t.triage_ms ?? "?"} ms. ` + t.sectors.map(s => {
+      const k = s.rule ? s.rule.signals.length : 0;
+      return s.triaged ? `${name(s)}: ${pct(s.p)} chance of a real breach, ${signs(k)}, so it's cleared.`
+                       : `${name(s)}: ${pct(s.p)} chance with ${signs(k)}, so the agents take over.`; }).join(" ")];
+    case 2: if (!crew.length) return [STEP_NAMES[2], "No agents needed: the filter cleared every area."];
+      return [STEP_NAMES[2], (first ? `A scout enters the ${human(first.name)}. It knows only this room. It rates the threat ${first.scout.threat_level}/10 with ${first.scout.civilians_at_risk} people at risk and recommends ${first.scout.recommended_action}. ` : "") +
+        (t.grounding_reused ? "The researcher reuses what it already found on You.com."
+          : t.grounding.length ? `Meanwhile the researcher searches You.com: "${cut(t.grounding[0].fact, 100)}"` : "Meanwhile the researcher searches You.com.")];
+    case 3: return [STEP_NAMES[3], crew.length && d ? `The commander weighs the scout's report and the research, and decides: ${d.action.toUpperCase()}, ${pct(d.confidence)} confident.`
+                                                     : "Nothing for the commander to decide this tick."];
+    case 4: { const gs = t.sectors.filter(s => s.gate);
+      if (!gs.length) return [STEP_NAMES[4], "Nothing stronger than observe was proposed, so there is nothing to block."];
+      return [STEP_NAMES[4], gs.map(s => s.gate.final === s.gate.proposed
+        ? (s.gate.final === "observe" ? `${name(s)}: observe, nothing to check.` : `${name(s)}: ${signs(s.rule ? s.rule.signals.length : 0)} and a ${pct(s.p)} chance are both above the bar, so ${s.gate.final} stands.`)
+        : `${name(s)}: not enough evidence, so ${s.gate.proposed} is downgraded to observe.`).join(" ")]; }
+    case 5: { const j = t.submission && t.submission.judgment;
+      return [STEP_NAMES[5], j ? `The decision goes back to the event: ${t.tick_action}. The event expected ${j.expected}: ${j.verdict === "correct" ? `correct, +${j.score} point` : `${j.verdict}, score ${j.score}`}. ${j.false_alarm ? "Counted as a false alarm." : "No false alarm."}`
+                               : `Offline run: ${t.tick_action} is decided but not submitted.`]; }
+    case 6: { if (!t.escalations.length) return [STEP_NAMES[6], "Nothing dangerous, so no Discord alert is sent."];
+      const e = t.escalations[0], m = cut(e.message, 110);
+      const say = { rejected: `The radio sends the alert through One to Discord's #loft-incident. Discord refused it (error 401), so the team posted it by hand: "${m}"`,
+                    posted: `Alert posted to #loft-incident through One: "${m}"`,
+                    dry_run: `Offline run: the alert is written but not posted: "${m}"`,
+                    manual: `One could not post it, so it was saved for a manual post: "${m}"` };
+      return [STEP_NAMES[6], say[e.status] || `${e.label || e.status}: "${m}"`]; }
   }
 }
-function dialog(t, pi, p, crew) {
-  const [who, msg] = lineFor(t, pi, crew), x = 8, y = 220, w = W - 16, h = 74;
+function dialog(t, ti, pi, seg, crew) {
+  const [who, msg] = narrate(t, ti, pi, crew), x = 8, y = 220, w = W - 16, h = 74;
   rect(x, y, w, h, C.box); rect(x, y, w, 2, C.accent); rect(x, y + h - 2, w, 2, C.accent); rect(x, y, 2, h, C.accent); rect(x + w - 2, y, 2, h, C.accent);
   g.font = "8px Silkscreen, monospace"; const tw = g.measureText(who).width + 10;
   rect(x + 8, y - 6, tw, 12, C.accent); text(who, x + 13, y - 4, C.dark);
-  const shown = msg.slice(0, Math.ceil(msg.length * clamp(p / 0.55, 0, 1)));
-  wrap(shown, w - 20).slice(0, 5).forEach((ln, i) => text(ln, x + 10, y + 12 + i * 11, C.text));
-  if (p >= 0.55 && Math.floor(performance.now() / 400) % 2) text("▼", x + w - 14, y + h - 12, C.accent);
+  let lines = wrap(msg, w - 20);
+  if (lines.length > 5) { lines = lines.slice(0, 5); lines[4] = lines[4].replace(/\s*\S*$/, "") + "…"; }
+  let budget = Math.floor((now - seg.start) * TYPE_CPS);  // characters typed so far
+  lines.forEach((ln, i) => { if (budget > 0) text(ln.slice(0, budget), x + 10, y + 12 + i * 11, C.text); budget -= ln.length + 1; });
+  if (budget > 0 && Math.floor(performance.now() / 400) % 2) text("▼", x + w - 14, y + h - 12, C.accent);
   const cap = $("caption"), html = `<b>${who}</b><br>${msg.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]))}`;
   if (cap.dataset.k !== who + msg) { cap.innerHTML = html; cap.dataset.k = who + msg; }
 }
