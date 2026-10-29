@@ -9,13 +9,22 @@ Team `team-hollow-lantern-08`, scored by the scenario feed on 2026-10-28:
 
 | Tick | Submitted | Expected | Verdict | False alarm | Discord |
 |---|---|---|---|---|---|
-| 900 (control) | observe | observe | correct, 1 | no | none |
-| 142 | evacuate | evacuate | correct, 1 | no | posted via One |
-| 143 | evacuate | evacuate | correct, 1 | no | posted via One |
+| 900 (control) | observe | observe | correct, 1 | no | none (nothing to escalate) |
+| 142 | evacuate | evacuate | correct, 1 | no | One call made; Discord answered 401, posted by hand |
+| 143 | evacuate | evacuate | correct, 1 | no | One call made; Discord answered 401, posted by hand |
 
 Scoreboard after the run: 3 / 3, 0 false alarms. Watch it: open [docs/replay-live.html](docs/replay-live.html)
 in a browser (a pixel-art replay of that live run; space plays, arrow keys step).
 It runs with one command. CrewAI runs the swarm, Parasail makes every decision, You.com grounds it, and One takes the action. Three for three, zero false alarms. Thanks.
+
+**Discord escalation, what actually happened.** For both breaches the swarm found the Discord connection with
+`list_one_integrations`, found the send action with `find_one_actions` and called `execute_one_action` with the
+channel as a path variable. One completed the call, but Discord's own answer inside it was
+`"status": 401, "message": "401: Unauthorized"`. This is the case the event guide lists in §9 ("One cannot attach
+writable Discord credentials for this call"), whose fix is to post the escalation by hand and tell the organizers.
+The first version of `swarm/partners/one.py` only checked One's error flag and logged these as posted; it now reads
+the platform status (`platform_error`), retries once and then writes the exact message to `logs/manual_posts.txt`.
+The two messages were then posted to `#loft-incident` by hand, word for word from the log.
 
 ## Run
 
@@ -71,7 +80,8 @@ Every run writes:
                          hack26-submit-containment (one action per tick = most severe sector)
                                      ▼
                          One: find_one_actions → execute_one_action (channelId path var) → #loft-incident
-                              retry once, then log the exact message to logs/manual_posts.txt
+                              a One error or a Discord 4xx/5xx counts as a failure: retry once,
+                              then log the exact message to logs/manual_posts.txt for a manual post
 ```
 
 Agent budget: per chunk of sectors, `k scouts + 1 researcher + 1 manager <= swarm_budget.max_active_agents`;

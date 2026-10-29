@@ -201,8 +201,10 @@ function draw() {
   if (t.triage_ms != null) text(`${t.triage_ms} MS`, 92, 165, C.muted);
   // radio tower
   rect(62, 186, 3, 24, C.radio); rect(56, 208, 15, 2, C.radio); rect(58, 196, 11, 1, C.radio);
-  if (pi === 6 && t.escalations.length) for (let k = 0; k < 3; k++) { const r = ((anim * 30 + k * 10) % 30); g.globalAlpha = 1 - r / 30; g.strokeStyle = C.radio; g.lineWidth = 1; g.beginPath(); g.arc(63.5, 187, r, Math.PI * 1.1, Math.PI * 1.9); g.stroke(); }
+  if (pi === 6 && t.escalations.length) for (let k = 0; k < 3; k++) { const r = ((anim * 30 + k * 10) % 30); g.globalAlpha = 1 - r / 30; g.strokeStyle = t.escalations[0].ok === false ? C.evacuate : C.radio; g.lineWidth = 1; g.beginPath(); g.arc(63.5, 187, r, Math.PI * 1.1, Math.PI * 1.9); g.stroke(); }
   g.globalAlpha = 1;
+  if (pi === 6 && t.escalations.length && t.escalations[0].ok === false && t.escalations[0].status === "rejected")
+    text("DISCORD 401", 76, 196, C.evacuate);
 
   // sector rooms
   t.sectors.forEach(s => {
@@ -279,7 +281,9 @@ function lineFor(t, pi, crew) {
     case 3: return crew.length && d ? ["COMMANDER · PARASAIL", `${d.action.toUpperCase()} at confidence ${fmt(d.confidence)}. ${d.rationale}`] : ["COMMANDER", "Nothing to command this tick."];
     case 4: { const gs = t.sectors.filter(s => s.gate); return ["GATE · RULE + DECISIONS", gs.length ? gs.map(s => `${human(s.name)}: ${s.gate.proposed} → ${s.gate.final} (${s.gate.why})`).join(" ") : "Nothing proposed beyond observe. Nothing to veto."]; }
     case 5: { const j = t.submission && t.submission.judgment; return ["SCENARIO FEED", j ? `Submitted ${t.tick_action}. Expected ${j.expected}: ${j.verdict}, score ${j.score}, false alarm ${j.false_alarm}. ${j.rationale}` : `Dry run: ${t.tick_action} not submitted.`]; }
-    case 6: return t.escalations.length ? ["RADIO · ONE → #LOFT-INCIDENT", `${t.escalations[0].status.toUpperCase()}: ${t.escalations[0].message}`] : ["RADIO", "No contain or evacuate. Nothing posted."];
+    case 6: { if (!t.escalations.length) return ["RADIO", "No contain or evacuate. Nothing posted."];
+      const e = t.escalations[0];
+      return ["RADIO · ONE → #LOFT-INCIDENT", `${e.label || String(e.status).toUpperCase()} Message: ${e.message}`]; }
   }
 }
 function dialog(t, pi, p, crew) {

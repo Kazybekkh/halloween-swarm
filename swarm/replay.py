@@ -7,6 +7,7 @@ Every value on the page comes from the log. Older logs without raw readings are 
 logs/feed_queue.json and fixtures/*.json by tick id.
 """
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -25,6 +26,25 @@ def _known_ticks() -> dict[int, dict]:
         for t in json.loads(queue.read_text()).get("ticks", {}).values():
             known[t["tick_id"]] = t  # live data wins over fixtures
     return known
+
+
+def _outcome(esc: dict) -> dict:
+    """What actually happened to one escalation, read from Discord's answer rather than the logged status.
+
+    Logs written before one.platform_error existed record "posted" even when Discord answered 401, so the
+    platform status inside the stored response wins.
+    """
+    status = esc.get("status")
+    m = re.search(r'"status":\s*(\d{3})', esc.get("response") or "")
+    if m and int(m.group(1)) >= 400:
+        return {"status": "rejected", "ok": False,
+                "label": f"One called Discord; Discord rejected the write (HTTP {m.group(1)}). Fallback: post it by hand (guide §9)."}
+    if status == "manual":
+        return {"status": status, "ok": False,
+                "label": f"Not posted ({esc.get('error') or 'One failed'}). Logged for a manual post."}
+    if status == "dry_run":
+        return {"status": status, "ok": False, "label": "Dry run: built, not posted."}
+    return {"status": status, "ok": status == "posted", "label": "Posted to #loft-incident via One."}
 
 
 def build(log_path: Path) -> dict:
@@ -97,8 +117,7 @@ def build(log_path: Path) -> dict:
             for name, a in (e.get("sector_actions") or {}).items():
                 sector(name)["final"] = a.get("action")
             messages = cur.pop("_messages", [])  # a posted result carries no message; its log event does
-            cur["escalations"] = [{"status": x.get("status"),
-                                   "message": x.get("message") or (messages[i] if i < len(messages) else None)}
+            cur["escalations"] = [{**_outcome(x), "message": x.get("message") or (messages[i] if i < len(messages) else None)}
                                   for i, x in enumerate(e.get("escalations") or [])]
     return run
 

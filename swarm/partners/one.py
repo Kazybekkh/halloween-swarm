@@ -77,7 +77,30 @@ async def _post(content: str) -> dict:
                 text = _text(res)
                 if res.isError:
                     raise RuntimeError(text[:300])
+                discord_error = platform_error(text)
+                if discord_error:
+                    raise RuntimeError(discord_error)
                 return {"action_id": action["actionId"], "response": text[:300]}
+
+
+def platform_error(text: str) -> str | None:
+    """The platform's own failure inside a successful One call, or None.
+
+    One passes the platform's response through unchanged (one-hackathon SKILL.md, "Errors"), so a call that
+    One itself completes can still carry Discord's rejection, e.g.
+    {"responseData": {"message": "401: Unauthorized"}, "status": 401, ...}.
+    """
+    data = _json(text)
+    if not isinstance(data, dict):
+        return None
+    status = data.get("status")
+    if isinstance(status, str) and status.isdigit():
+        status = int(status)
+    if isinstance(status, int) and status >= 400:
+        body = data.get("responseData")
+        detail = body.get("message") if isinstance(body, dict) else body
+        return f"Discord rejected the post: HTTP {status}: {str(detail)[:150]}"
+    return None
 
 
 def escalate(content: str, dry_run: bool = False) -> dict:
